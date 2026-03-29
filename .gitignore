@@ -1,0 +1,22 @@
+# ROS2 / colcon build artifacts
+build/
+install/
+log/
+
+# Python cache / bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# Editor / OS files
+.DS_Store
+*.swp
+*.swo
+
+# Runtime outputs
+runs/
