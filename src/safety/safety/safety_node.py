@@ -4,6 +4,7 @@ import time
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 from std_msgs.msg import Float32, String, UInt8, Bool
 
@@ -32,6 +33,8 @@ class SafetyNode(Node):
 
         self.declare_parameter("invalid_zone_frames_for_danger", 3)
         self.declare_parameter("min_publish_hz", 10.0)
+        self.declare_parameter("qos_reliability", "best_effort")  # reliable | best_effort
+        self.declare_parameter("qos_depth", 10)
 
         self.z_topic = str(self.get_parameter("z_topic").value)
         self.detected_topic = str(self.get_parameter("detected_topic").value)
@@ -45,14 +48,17 @@ class SafetyNode(Node):
         self.warning_m = float(self.get_parameter("warning_m").value)
         self.invalid_zone_frames_for_danger = int(self.get_parameter("invalid_zone_frames_for_danger").value)
         self.min_publish_hz = float(self.get_parameter("min_publish_hz").value)
+        self.qos_reliability = str(self.get_parameter("qos_reliability").value).strip().lower()
+        self.qos_depth = int(self.get_parameter("qos_depth").value)
+        self.qos = self._build_qos()
 
-        self.pub_state = self.create_publisher(String, self.out_state_topic, 10)
-        self.pub_level = self.create_publisher(UInt8, self.out_level_topic, 10)
+        self.pub_state = self.create_publisher(String, self.out_state_topic, self.qos)
+        self.pub_level = self.create_publisher(UInt8, self.out_level_topic, self.qos)
 
-        self.sub_z = self.create_subscription(Float32, self.z_topic, self.on_z, 10)
-        self.sub_detected = self.create_subscription(Bool, self.detected_topic, self.on_detected, 10)
-        self.sub_depth_valid = self.create_subscription(Bool, self.depth_valid_topic, self.on_depth_valid, 10)
-        self.sub_in_zone = self.create_subscription(Bool, self.in_zone_topic, self.on_in_zone, 10)
+        self.sub_z = self.create_subscription(Float32, self.z_topic, self.on_z, self.qos)
+        self.sub_detected = self.create_subscription(Bool, self.detected_topic, self.on_detected, self.qos)
+        self.sub_depth_valid = self.create_subscription(Bool, self.depth_valid_topic, self.on_depth_valid, self.qos)
+        self.sub_in_zone = self.create_subscription(Bool, self.in_zone_topic, self.on_in_zone, self.qos)
 
         self.person_detected = False
         self.depth_valid = False
@@ -72,7 +78,23 @@ class SafetyNode(Node):
 
         self.get_logger().info(
             f"Safety node started | z={self.z_topic} detected={self.detected_topic} "
-            f"depth_valid={self.depth_valid_topic} in_zone={self.in_zone_topic}"
+            f"depth_valid={self.depth_valid_topic} in_zone={self.in_zone_topic} "
+            f"| qos={self.qos_reliability}"
+        )
+
+    def _build_qos(self):
+        reliability = ReliabilityPolicy.RELIABLE
+        if self.qos_reliability == "best_effort":
+            reliability = ReliabilityPolicy.BEST_EFFORT
+        elif self.qos_reliability != "reliable":
+            self.get_logger().warn(f"Unknown qos_reliability='{self.qos_reliability}', using 'reliable'")
+            self.qos_reliability = "reliable"
+
+        return QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=max(1, self.qos_depth),
+            reliability=reliability,
+            durability=DurabilityPolicy.VOLATILE,
         )
 
     def on_detected(self, msg: Bool):

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 import time
 import numpy as np
+import cv2
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 
@@ -18,26 +19,51 @@ class RcVisardCameraNode(Node):
         super().__init__("rc_visard_camera_node")
 
         self.declare_parameter("intensity_topic", "/camera/intensity")
+        self.declare_parameter("intensity_rgb_topic", "/camera/intensity_rgb")
         self.declare_parameter("disparity_topic", "/camera/disparity")
         self.declare_parameter("n_buffers", 16)
         self.declare_parameter("timeout_us", 200_000)
         self.declare_parameter("drain_max", 6)
+        self.declare_parameter("qos_reliability", "best_effort")  # reliable | best_effort
+        self.declare_parameter("qos_depth", 10)
 
         self.intensity_topic = str(self.get_parameter("intensity_topic").value)
+        self.intensity_rgb_topic = str(self.get_parameter("intensity_rgb_topic").value)
         self.disparity_topic = str(self.get_parameter("disparity_topic").value)
         self.n_buffers = int(self.get_parameter("n_buffers").value)
         self.timeout_us = int(self.get_parameter("timeout_us").value)
         self.drain_max = int(self.get_parameter("drain_max").value)
+        self.qos_reliability = str(self.get_parameter("qos_reliability").value).strip().lower()
+        self.qos_depth = int(self.get_parameter("qos_depth").value)
+        self.qos = self._build_qos()
 
-        self.pub_i = self.create_publisher(Image, self.intensity_topic, qos_profile_sensor_data)
-        self.pub_d = self.create_publisher(Image, self.disparity_topic, qos_profile_sensor_data)
+        self.pub_i = self.create_publisher(Image, self.intensity_topic, self.qos)
+        self.pub_i_rgb = self.create_publisher(Image, self.intensity_rgb_topic, self.qos)
+        self.pub_d = self.create_publisher(Image, self.disparity_topic, self.qos)
         self.bridge = CvBridge()
 
         self.cam, self.dev, self.stream = self._init_aravis()
         self.timer = self.create_timer(0.0, self._loop)
 
         self.get_logger().info(f"Publishing intensity -> {self.intensity_topic}")
+        self.get_logger().info(f"Publishing intensity rgb -> {self.intensity_rgb_topic}")
         self.get_logger().info(f"Publishing disparity -> {self.disparity_topic}")
+        self.get_logger().info(f"QoS: reliability={self.qos_reliability} depth={self.qos.depth}")
+
+    def _build_qos(self):
+        reliability = ReliabilityPolicy.RELIABLE
+        if self.qos_reliability == "best_effort":
+            reliability = ReliabilityPolicy.BEST_EFFORT
+        elif self.qos_reliability != "reliable":
+            self.get_logger().warn(f"Unknown qos_reliability='{self.qos_reliability}', using 'reliable'")
+            self.qos_reliability = "reliable"
+
+        return QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=max(1, self.qos_depth),
+            reliability=reliability,
+            durability=DurabilityPolicy.VOLATILE,
+        )
 
     def _find_device(self):
         Aravis.enable_interface("GigEVision")
@@ -124,10 +150,17 @@ class RcVisardCameraNode(Node):
         if n >= mono_expected and (n - mono_expected) < 65536:
             raw = data[:mono_expected]
             img8 = np.frombuffer(raw, dtype=np.uint8).reshape((h, w))
-            msg = self.bridge.cv2_to_imgmsg(img8, encoding="mono8")
-            msg.header.stamp = stamp
-            msg.header.frame_id = "rc_visard_left"
-            self.pub_i.publish(msg)
+            msg_mono = self.bridge.cv2_to_imgmsg(img8, encoding="mono8")
+            msg_mono.header.stamp = stamp
+            msg_mono.header.frame_id = "rc_visard_left"
+            self.pub_i.publish(msg_mono)
+
+            # Not true camera color: this is a 3-channel copy for RGB-based pipelines.
+            img_rgb = cv2.cvtColor(img8, cv2.COLOR_GRAY2RGB)
+            msg_rgb = self.bridge.cv2_to_imgmsg(img_rgb, encoding="rgb8")
+            msg_rgb.header.stamp = stamp
+            msg_rgb.header.frame_id = "rc_visard_left"
+            self.pub_i_rgb.publish(msg_rgb)
             return
     def destroy_node(self):
         try:

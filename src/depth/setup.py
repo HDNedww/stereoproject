@@ -25,6 +25,7 @@ setup(
     entry_points={
     'console_scripts': [
         'depth_node = depth.depth_node:main',
+        'rviz_image_relay_node = depth.rviz_image_relay_node:main',
     ],
 },
 
