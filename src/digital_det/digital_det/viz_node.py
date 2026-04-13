@@ -15,29 +15,33 @@ class VizNode(Node):
         self.declare_parameter("input_topic", "/camera/intensity")
         self.declare_parameter("det_topic", "/det/persons")
         self.declare_parameter("output_topic", "/det/viz")
-        self.declare_parameter("qos_reliability", "best_effort")  # reliable | best_effort
+        self.declare_parameter("qos_reliability_sub", "best_effort")  # reliable | best_effort
+        self.declare_parameter("qos_reliability_pub", "reliable")     # reliable | best_effort
         self.declare_parameter("qos_depth", 10)
 
         self.input_topic = str(self.get_parameter("input_topic").value)
         self.det_topic = str(self.get_parameter("det_topic").value)
         self.output_topic = str(self.get_parameter("output_topic").value)
-        self.qos_reliability = str(self.get_parameter("qos_reliability").value).strip().lower()
+        self.qos_reliability_sub = str(self.get_parameter("qos_reliability_sub").value).strip().lower()
+        self.qos_reliability_pub = str(self.get_parameter("qos_reliability_pub").value).strip().lower()
         self.qos_depth = int(self.get_parameter("qos_depth").value)
-        self.qos = self._build_qos()
+        self.qos_sub = self._build_qos(self.qos_reliability_sub, default="best_effort")
+        self.qos_pub = self._build_qos(self.qos_reliability_pub, default="reliable")
 
-        self.create_subscription(Image, self.input_topic, self.on_image, self.qos)
-        self.create_subscription(Detection2DArray, self.det_topic, self.on_dets, self.qos)
-        self.pub = self.create_publisher(Image, self.output_topic, self.qos)
-        self.get_logger().info(f"viz_node ready -> {self.output_topic} | qos={self.qos_reliability}")
+        self.create_subscription(Image, self.input_topic, self.on_image, self.qos_sub)
+        self.create_subscription(Detection2DArray, self.det_topic, self.on_dets, self.qos_sub)
+        self.pub = self.create_publisher(Image, self.output_topic, self.qos_pub)
+        self.get_logger().info(
+            f"viz_node ready -> {self.output_topic} | sub_qos={self.qos_reliability_sub} pub_qos={self.qos_reliability_pub}"
+        )
 
-    def _build_qos(self):
+    def _build_qos(self, reliability_name: str, default: str):
         reliability = ReliabilityPolicy.RELIABLE
-        if self.qos_reliability == "best_effort":
+        if reliability_name == "best_effort":
             reliability = ReliabilityPolicy.BEST_EFFORT
-        elif self.qos_reliability != "reliable":
-            self.get_logger().warn(f"Unknown qos_reliability='{self.qos_reliability}', using 'best_effort'")
-            reliability = ReliabilityPolicy.BEST_EFFORT
-            self.qos_reliability = "best_effort"
+        elif reliability_name != "reliable":
+            self.get_logger().warn(f"Unknown reliability='{reliability_name}', using '{default}'")
+            reliability = ReliabilityPolicy.BEST_EFFORT if default == "best_effort" else ReliabilityPolicy.RELIABLE
 
         return QoSProfile(
             history=HistoryPolicy.KEEP_LAST,

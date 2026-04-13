@@ -25,6 +25,7 @@ setup(
     entry_points={
     'console_scripts': [
         'safety_node = safety.safety_node:main',
+        'experiment_logger_node = safety.experiment_logger_node:main',
     ],
 },
 

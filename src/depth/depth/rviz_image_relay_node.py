@@ -19,6 +19,8 @@ class RvizImageRelayNode(Node):
         self.declare_parameter("out_disparity_topic", "/rviz/camera/disparity")
         self.declare_parameter("in_colormap_topic", "/depth/colormap")
         self.declare_parameter("out_colormap_topic", "/rviz/depth/colormap")
+        self.declare_parameter("in_det_viz_topic", "/det/viz")
+        self.declare_parameter("out_det_viz_topic", "/rviz/det/viz")
         self.declare_parameter("in_depth_topic", "/depth/image_m")
         self.declare_parameter("out_depth_topic", "/rviz/depth/image_m")
         self.declare_parameter("relay_depth_image", False)
@@ -32,6 +34,8 @@ class RvizImageRelayNode(Node):
         out_disparity_topic = str(self.get_parameter("out_disparity_topic").value)
         in_colormap_topic = str(self.get_parameter("in_colormap_topic").value)
         out_colormap_topic = str(self.get_parameter("out_colormap_topic").value)
+        in_det_viz_topic = str(self.get_parameter("in_det_viz_topic").value)
+        out_det_viz_topic = str(self.get_parameter("out_det_viz_topic").value)
         in_depth_topic = str(self.get_parameter("in_depth_topic").value)
         out_depth_topic = str(self.get_parameter("out_depth_topic").value)
         relay_depth_image = bool(self.get_parameter("relay_depth_image").value)
@@ -54,6 +58,7 @@ class RvizImageRelayNode(Node):
         self.pub_intensity_mono = self.create_publisher(Image, out_intensity_mono_topic, self.qos_pub)
         self.pub_disparity = self.create_publisher(Image, out_disparity_topic, self.qos_pub)
         self.pub_colormap = self.create_publisher(Image, out_colormap_topic, self.qos_pub)
+        self.pub_det_viz = self.create_publisher(Image, out_det_viz_topic, self.qos_pub)
         self.sub_intensity = self.create_subscription(
             Image, in_intensity_topic, partial(self._relay_cb, self.pub_intensity), self.qos_sub
         )
@@ -65,6 +70,9 @@ class RvizImageRelayNode(Node):
         )
         self.sub_colormap = self.create_subscription(
             Image, in_colormap_topic, partial(self._relay_cb, self.pub_colormap), self.qos_sub
+        )
+        self.sub_det_viz = self.create_subscription(
+            Image, in_det_viz_topic, partial(self._relay_cb, self.pub_det_viz), self.qos_sub
         )
 
         if relay_depth_image:
@@ -81,6 +89,7 @@ class RvizImageRelayNode(Node):
             f"{in_intensity_mono_topic} -> {out_intensity_mono_topic}, "
             f"{in_disparity_topic} -> {out_disparity_topic}, "
             f"{in_colormap_topic} -> {out_colormap_topic}, "
+            f"{in_det_viz_topic} -> {out_det_viz_topic}, "
             f"depth relay={'on' if relay_depth_image else 'off'}"
         )
 
