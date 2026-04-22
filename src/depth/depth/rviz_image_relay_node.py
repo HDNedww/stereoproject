@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from functools import partial
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -24,6 +25,8 @@ class RvizImageRelayNode(Node):
         self.declare_parameter("in_depth_topic", "/depth/image_m")
         self.declare_parameter("out_depth_topic", "/rviz/depth/image_m")
         self.declare_parameter("relay_depth_image", False)
+        self.declare_parameter("relay_max_hz", 0.0)  # 0 disables throttling
+        self.declare_parameter("qos_reliability_pub", "reliable")  # reliable | best_effort
         self.declare_parameter("qos_depth", 10)
 
         in_intensity_topic = str(self.get_parameter("in_intensity_topic").value)
@@ -39,6 +42,8 @@ class RvizImageRelayNode(Node):
         in_depth_topic = str(self.get_parameter("in_depth_topic").value)
         out_depth_topic = str(self.get_parameter("out_depth_topic").value)
         relay_depth_image = bool(self.get_parameter("relay_depth_image").value)
+        relay_max_hz = float(self.get_parameter("relay_max_hz").value)
+        qos_reliability_pub = str(self.get_parameter("qos_reliability_pub").value).strip().lower()
         qos_depth = int(self.get_parameter("qos_depth").value)
 
         self.qos_sub = QoSProfile(
@@ -47,12 +52,23 @@ class RvizImageRelayNode(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )
+        pub_reliability = ReliabilityPolicy.RELIABLE
+        if qos_reliability_pub == "best_effort":
+            pub_reliability = ReliabilityPolicy.BEST_EFFORT
+        elif qos_reliability_pub != "reliable":
+            self.get_logger().warn(
+                f"Unknown qos_reliability_pub='{qos_reliability_pub}', using 'reliable'"
+            )
+            qos_reliability_pub = "reliable"
+
         self.qos_pub = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=max(1, qos_depth),
-            reliability=ReliabilityPolicy.RELIABLE,
+            reliability=pub_reliability,
             durability=DurabilityPolicy.VOLATILE,
         )
+        self._min_dt = (1.0 / relay_max_hz) if relay_max_hz > 0.0 else 0.0
+        self._last_pub_t = {}
 
         self.pub_intensity = self.create_publisher(Image, out_intensity_topic, self.qos_pub)
         self.pub_intensity_mono = self.create_publisher(Image, out_intensity_mono_topic, self.qos_pub)
@@ -90,10 +106,23 @@ class RvizImageRelayNode(Node):
             f"{in_disparity_topic} -> {out_disparity_topic}, "
             f"{in_colormap_topic} -> {out_colormap_topic}, "
             f"{in_det_viz_topic} -> {out_det_viz_topic}, "
-            f"depth relay={'on' if relay_depth_image else 'off'}"
+            f"depth relay={'on' if relay_depth_image else 'off'} "
+            f"| pub_qos={qos_reliability_pub} relay_max_hz={relay_max_hz}"
         )
 
     def _relay_cb(self, pub, msg: Image):
+        # Skip image forwarding when RViz (or other consumers) is not listening.
+        if pub.get_subscription_count() <= 0:
+            return
+
+        if self._min_dt > 0.0:
+            now = time.monotonic()
+            key = id(pub)
+            last = self._last_pub_t.get(key)
+            if last is not None and (now - last) < self._min_dt:
+                return
+            self._last_pub_t[key] = now
+
         pub.publish(msg)
 
 

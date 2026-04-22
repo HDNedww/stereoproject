@@ -153,6 +153,7 @@ class SafetyNode(Node):
         if now - self.last_debug_print_t >= 1.0:
             input_fps = self.input_count / elapsed
             output_fps = self.output_count / elapsed
+            safety_state_hz = output_fps
 
             z_text = f"{self.last_z:.2f} m" if self.depth_valid and self.last_z > 0.0 else "invalid"
 
@@ -163,6 +164,7 @@ class SafetyNode(Node):
                 f"distance={z_text} | state={state} | "
                 f"invalid_zone_frames={self.invalid_in_zone_count} | "
                 f"input_fps={input_fps:.2f} | output_fps={output_fps:.2f}"
+                f" | safety_state_hz={safety_state_hz:.2f}"
             )
 
             self.input_count = 0

@@ -1,4 +1,5 @@
 import cv2
+import time
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
@@ -18,6 +19,7 @@ class VizNode(Node):
         self.declare_parameter("qos_reliability_sub", "best_effort")  # reliable | best_effort
         self.declare_parameter("qos_reliability_pub", "reliable")     # reliable | best_effort
         self.declare_parameter("qos_depth", 10)
+        self.declare_parameter("max_viz_hz", 0.0)  # 0 disables throttling
 
         self.input_topic = str(self.get_parameter("input_topic").value)
         self.det_topic = str(self.get_parameter("det_topic").value)
@@ -25,6 +27,9 @@ class VizNode(Node):
         self.qos_reliability_sub = str(self.get_parameter("qos_reliability_sub").value).strip().lower()
         self.qos_reliability_pub = str(self.get_parameter("qos_reliability_pub").value).strip().lower()
         self.qos_depth = int(self.get_parameter("qos_depth").value)
+        self.max_viz_hz = float(self.get_parameter("max_viz_hz").value)
+        self._min_dt = (1.0 / self.max_viz_hz) if self.max_viz_hz > 0.0 else 0.0
+        self._last_pub_t = 0.0
         self.qos_sub = self._build_qos(self.qos_reliability_sub, default="best_effort")
         self.qos_pub = self._build_qos(self.qos_reliability_pub, default="reliable")
 
@@ -32,7 +37,8 @@ class VizNode(Node):
         self.create_subscription(Detection2DArray, self.det_topic, self.on_dets, self.qos_sub)
         self.pub = self.create_publisher(Image, self.output_topic, self.qos_pub)
         self.get_logger().info(
-            f"viz_node ready -> {self.output_topic} | sub_qos={self.qos_reliability_sub} pub_qos={self.qos_reliability_pub}"
+            f"viz_node ready -> {self.output_topic} | sub_qos={self.qos_reliability_sub} "
+            f"pub_qos={self.qos_reliability_pub} max_viz_hz={self.max_viz_hz}"
         )
 
     def _build_qos(self, reliability_name: str, default: str):
@@ -54,6 +60,15 @@ class VizNode(Node):
         self.latest_dets = msg.detections
 
     def on_image(self, msg: Image):
+        if self.pub.get_subscription_count() <= 0:
+            return
+
+        if self._min_dt > 0.0:
+            now = time.monotonic()
+            if (now - self._last_pub_t) < self._min_dt:
+                return
+            self._last_pub_t = now
+
         try:
             img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
         except Exception as e:
