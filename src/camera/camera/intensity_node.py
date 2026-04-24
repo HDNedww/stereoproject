@@ -7,6 +7,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
+from std_msgs.msg import Float32
 from cv_bridge import CvBridge
 
 import gi
@@ -26,6 +27,10 @@ class RcVisardCameraNode(Node):
         self.declare_parameter("drain_max", 6)
         self.declare_parameter("qos_reliability", "best_effort")  # reliable | best_effort
         self.declare_parameter("qos_depth", 10)
+        self.declare_parameter("latency_mode", False)
+        self.declare_parameter("out_latency_topic", "/latency/camera_ms")  # legacy combined metric
+        self.declare_parameter("out_intensity_latency_topic", "/latency/camera_intensity_ms")
+        self.declare_parameter("out_disparity_latency_topic", "/latency/camera_disparity_ms")
 
         self.intensity_topic = str(self.get_parameter("intensity_topic").value)
         self.intensity_rgb_topic = str(self.get_parameter("intensity_rgb_topic").value)
@@ -35,11 +40,22 @@ class RcVisardCameraNode(Node):
         self.drain_max = int(self.get_parameter("drain_max").value)
         self.qos_reliability = str(self.get_parameter("qos_reliability").value).strip().lower()
         self.qos_depth = int(self.get_parameter("qos_depth").value)
+        self.latency_mode = bool(self.get_parameter("latency_mode").value)
+        self.out_latency_topic = str(self.get_parameter("out_latency_topic").value)
+        self.out_intensity_latency_topic = str(self.get_parameter("out_intensity_latency_topic").value)
+        self.out_disparity_latency_topic = str(self.get_parameter("out_disparity_latency_topic").value)
         self.qos = self._build_qos()
 
         self.pub_i = self.create_publisher(Image, self.intensity_topic, self.qos)
         self.pub_i_rgb = self.create_publisher(Image, self.intensity_rgb_topic, self.qos)
         self.pub_d = self.create_publisher(Image, self.disparity_topic, self.qos)
+        self.pub_latency = self.create_publisher(Float32, self.out_latency_topic, self.qos) if self.latency_mode else None
+        self.pub_latency_intensity = (
+            self.create_publisher(Float32, self.out_intensity_latency_topic, self.qos) if self.latency_mode else None
+        )
+        self.pub_latency_disparity = (
+            self.create_publisher(Float32, self.out_disparity_latency_topic, self.qos) if self.latency_mode else None
+        )
         self.bridge = CvBridge()
 
         self.cam, self.dev, self.stream = self._init_aravis()
@@ -49,6 +65,11 @@ class RcVisardCameraNode(Node):
         self.get_logger().info(f"Publishing intensity rgb -> {self.intensity_rgb_topic}")
         self.get_logger().info(f"Publishing disparity -> {self.disparity_topic}")
         self.get_logger().info(f"QoS: reliability={self.qos_reliability} depth={self.qos.depth}")
+        if self.latency_mode:
+            self.get_logger().info(
+                f"Latency mode ON -> {self.out_latency_topic}, "
+                f"{self.out_intensity_latency_topic}, {self.out_disparity_latency_topic}"
+            )
 
     def _build_qos(self):
         reliability = ReliabilityPolicy.RELIABLE
@@ -117,6 +138,7 @@ class RcVisardCameraNode(Node):
         return latest
 
     def _loop(self):
+        t0 = time.perf_counter()
         buf = self._pop_latest()
         if buf is None:
             return
@@ -144,6 +166,15 @@ class RcVisardCameraNode(Node):
             msg.header.stamp = stamp
             msg.header.frame_id = "rc_visard_left"
             self.pub_d.publish(msg)
+            if self.pub_latency is not None:
+                lat_ms = float((time.perf_counter() - t0) * 1000.0)
+                lat = Float32()
+                lat.data = lat_ms
+                self.pub_latency.publish(lat)
+                if self.pub_latency_disparity is not None:
+                    lat_d = Float32()
+                    lat_d.data = lat_ms
+                    self.pub_latency_disparity.publish(lat_d)
             return
 
         # intensity mono8
@@ -161,6 +192,15 @@ class RcVisardCameraNode(Node):
             msg_rgb.header.stamp = stamp
             msg_rgb.header.frame_id = "rc_visard_left"
             self.pub_i_rgb.publish(msg_rgb)
+            if self.pub_latency is not None:
+                lat_ms = float((time.perf_counter() - t0) * 1000.0)
+                lat = Float32()
+                lat.data = lat_ms
+                self.pub_latency.publish(lat)
+                if self.pub_latency_intensity is not None:
+                    lat_i = Float32()
+                    lat_i.data = lat_ms
+                    self.pub_latency_intensity.publish(lat_i)
             return
     def destroy_node(self):
         try:

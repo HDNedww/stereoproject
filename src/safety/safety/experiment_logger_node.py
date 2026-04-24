@@ -33,6 +33,20 @@ class ExperimentLoggerNode(Node):
         self.declare_parameter("disparity_topic", "/camera/disparity")
         self.declare_parameter("detection_image_topic", "/camera/intensity_rgb")
         self.declare_parameter("scale_detection_to_disparity", True)
+        self.declare_parameter("latency_mode", False)
+        self.declare_parameter("camera_latency_topic", "/latency/camera_ms")  # legacy total
+        self.declare_parameter("camera_intensity_latency_topic", "/latency/camera_intensity_ms")
+        self.declare_parameter("camera_disparity_latency_topic", "/latency/camera_disparity_ms")
+        self.declare_parameter("yolo_latency_topic", "/latency/yolo_ms")  # legacy total
+        self.declare_parameter("yolo_infer_latency_topic", "/latency/yolo_infer_ms")
+        self.declare_parameter("yolo_queue_latency_topic", "/latency/yolo_queue_ms")
+        self.declare_parameter("depth_latency_topic", "/latency/depth_ms")  # legacy total
+        self.declare_parameter("depth_crop_latency_topic", "/latency/depth_roi_crop_ms")
+        self.declare_parameter("depth_distance_latency_topic", "/latency/depth_distance_ms")
+        self.declare_parameter("depth_publish_latency_topic", "/latency/depth_publish_ms")
+        self.declare_parameter("safety_latency_topic", "/latency/safety_ms")  # legacy total
+        self.declare_parameter("safety_eval_latency_topic", "/latency/safety_eval_ms")
+        self.declare_parameter("safety_publish_latency_topic", "/latency/safety_publish_ms")
 
         # experiment metadata
         self.declare_parameter("experiment_id", "exp")
@@ -65,6 +79,20 @@ class ExperimentLoggerNode(Node):
         self.disparity_topic = str(self.get_parameter("disparity_topic").value)
         self.detection_image_topic = str(self.get_parameter("detection_image_topic").value)
         self.scale_detection_to_disparity = bool(self.get_parameter("scale_detection_to_disparity").value)
+        self.latency_mode = bool(self.get_parameter("latency_mode").value)
+        self.camera_latency_topic = str(self.get_parameter("camera_latency_topic").value)
+        self.camera_intensity_latency_topic = str(self.get_parameter("camera_intensity_latency_topic").value)
+        self.camera_disparity_latency_topic = str(self.get_parameter("camera_disparity_latency_topic").value)
+        self.yolo_latency_topic = str(self.get_parameter("yolo_latency_topic").value)
+        self.yolo_infer_latency_topic = str(self.get_parameter("yolo_infer_latency_topic").value)
+        self.yolo_queue_latency_topic = str(self.get_parameter("yolo_queue_latency_topic").value)
+        self.depth_latency_topic = str(self.get_parameter("depth_latency_topic").value)
+        self.depth_crop_latency_topic = str(self.get_parameter("depth_crop_latency_topic").value)
+        self.depth_distance_latency_topic = str(self.get_parameter("depth_distance_latency_topic").value)
+        self.depth_publish_latency_topic = str(self.get_parameter("depth_publish_latency_topic").value)
+        self.safety_latency_topic = str(self.get_parameter("safety_latency_topic").value)
+        self.safety_eval_latency_topic = str(self.get_parameter("safety_eval_latency_topic").value)
+        self.safety_publish_latency_topic = str(self.get_parameter("safety_publish_latency_topic").value)
 
         self.experiment_id = str(self.get_parameter("experiment_id").value)
         self.lighting = str(self.get_parameter("lighting").value)
@@ -123,6 +151,21 @@ class ExperimentLoggerNode(Node):
         self.latest_det_stamp_ns = None
         self.e2e_latency_ms_disp = -1.0
         self.e2e_latency_ms_det = -1.0
+        self.camera_node_ms = -1.0
+        self.camera_intensity_ms = -1.0
+        self.camera_disparity_ms = -1.0
+        self.yolo_node_ms = -1.0
+        self.yolo_infer_ms = -1.0
+        self.yolo_queue_ms = -1.0
+        self.depth_node_ms = -1.0
+        self.depth_crop_ms = -1.0
+        self.depth_distance_ms = -1.0
+        self.depth_publish_ms = -1.0
+        self.safety_node_ms = -1.0
+        self.safety_eval_ms = -1.0
+        self.safety_publish_ms = -1.0
+        self.total_system_latency_ms = -1.0
+        self.nodes_total_ms = -1.0
 
         self._init_csv()
         self._init_subscriptions()
@@ -187,6 +230,20 @@ class ExperimentLoggerNode(Node):
             "safety_state_hz",
             "e2e_latency_ms_disp_to_safety",
             "e2e_latency_ms_det_to_safety",
+            "camera_node_ms",
+            "camera_intensity_ms",
+            "camera_disparity_ms",
+            "yolo_node_ms",
+            "yolo_infer_ms",
+            "yolo_queue_ms",
+            "depth_node_ms",
+            "depth_crop_ms",
+            "depth_distance_ms",
+            "depth_publish_ms",
+            "safety_node_ms",
+            "safety_eval_ms",
+            "safety_publish_ms",
+            "total_system_latency_ms",
         ])
         self.csv_file.flush()
 
@@ -201,6 +258,20 @@ class ExperimentLoggerNode(Node):
         self.create_subscription(Detection2DArray, self.detections_topic, self.on_detections, self.qos)
         self.create_subscription(Image, self.disparity_topic, self.on_disparity, self.qos)
         self.create_subscription(Image, self.detection_image_topic, self.on_detection_image, self.qos)
+        if self.latency_mode:
+            self.create_subscription(Float32, self.camera_latency_topic, self.on_camera_latency, self.qos)
+            self.create_subscription(Float32, self.camera_intensity_latency_topic, self.on_camera_intensity_latency, self.qos)
+            self.create_subscription(Float32, self.camera_disparity_latency_topic, self.on_camera_disparity_latency, self.qos)
+            self.create_subscription(Float32, self.yolo_latency_topic, self.on_yolo_latency, self.qos)
+            self.create_subscription(Float32, self.yolo_infer_latency_topic, self.on_yolo_infer_latency, self.qos)
+            self.create_subscription(Float32, self.yolo_queue_latency_topic, self.on_yolo_queue_latency, self.qos)
+            self.create_subscription(Float32, self.depth_latency_topic, self.on_depth_latency, self.qos)
+            self.create_subscription(Float32, self.depth_crop_latency_topic, self.on_depth_crop_latency, self.qos)
+            self.create_subscription(Float32, self.depth_distance_latency_topic, self.on_depth_distance_latency, self.qos)
+            self.create_subscription(Float32, self.depth_publish_latency_topic, self.on_depth_publish_latency, self.qos)
+            self.create_subscription(Float32, self.safety_latency_topic, self.on_safety_latency, self.qos)
+            self.create_subscription(Float32, self.safety_eval_latency_topic, self.on_safety_eval_latency, self.qos)
+            self.create_subscription(Float32, self.safety_publish_latency_topic, self.on_safety_publish_latency, self.qos)
 
     def _init_timer(self):
         hz = max(0.2, self.log_rate_hz)
@@ -241,6 +312,45 @@ class ExperimentLoggerNode(Node):
 
     def on_safety_level(self, msg: UInt8):
         self.safety_level = int(msg.data)
+
+    def on_camera_latency(self, msg: Float32):
+        self.camera_node_ms = float(msg.data)
+
+    def on_camera_intensity_latency(self, msg: Float32):
+        self.camera_intensity_ms = float(msg.data)
+
+    def on_camera_disparity_latency(self, msg: Float32):
+        self.camera_disparity_ms = float(msg.data)
+
+    def on_yolo_latency(self, msg: Float32):
+        self.yolo_node_ms = float(msg.data)
+
+    def on_yolo_infer_latency(self, msg: Float32):
+        self.yolo_infer_ms = float(msg.data)
+
+    def on_yolo_queue_latency(self, msg: Float32):
+        self.yolo_queue_ms = float(msg.data)
+
+    def on_depth_latency(self, msg: Float32):
+        self.depth_node_ms = float(msg.data)
+
+    def on_depth_crop_latency(self, msg: Float32):
+        self.depth_crop_ms = float(msg.data)
+
+    def on_depth_distance_latency(self, msg: Float32):
+        self.depth_distance_ms = float(msg.data)
+
+    def on_depth_publish_latency(self, msg: Float32):
+        self.depth_publish_ms = float(msg.data)
+
+    def on_safety_latency(self, msg: Float32):
+        self.safety_node_ms = float(msg.data)
+
+    def on_safety_eval_latency(self, msg: Float32):
+        self.safety_eval_ms = float(msg.data)
+
+    def on_safety_publish_latency(self, msg: Float32):
+        self.safety_publish_ms = float(msg.data)
 
     def _clamp_bbox(self, cx: float, cy: float, bw: float, bh: float, w: int, h: int):
         x1 = int(max(0, min(w - 1, round(cx - bw * 0.5))))
@@ -392,6 +502,13 @@ class ExperimentLoggerNode(Node):
         now = self.get_clock().now()
         ros_time_s = now.nanoseconds / 1e9
         wall_time_iso = datetime.now().isoformat(timespec="milliseconds")
+        node_parts = []
+        for v in (self.camera_node_ms, self.yolo_node_ms, self.depth_node_ms, self.safety_node_ms):
+            if v >= 0.0:
+                node_parts.append(v)
+        self.nodes_total_ms = float(sum(node_parts)) if node_parts else -1.0
+        # Keep historical column name, but now reflect real sum of per-node processing ms.
+        self.total_system_latency_ms = self.nodes_total_ms
 
         self.csv_writer.writerow([
             wall_time_iso,
@@ -424,6 +541,20 @@ class ExperimentLoggerNode(Node):
             f"{self.safety_state_hz:.2f}",
             f"{self.e2e_latency_ms_disp:.2f}" if self.e2e_latency_ms_disp >= 0.0 else "",
             f"{self.e2e_latency_ms_det:.2f}" if self.e2e_latency_ms_det >= 0.0 else "",
+            f"{self.camera_node_ms:.2f}" if self.camera_node_ms >= 0.0 else "",
+            f"{self.camera_intensity_ms:.2f}" if self.camera_intensity_ms >= 0.0 else "",
+            f"{self.camera_disparity_ms:.2f}" if self.camera_disparity_ms >= 0.0 else "",
+            f"{self.yolo_node_ms:.2f}" if self.yolo_node_ms >= 0.0 else "",
+            f"{self.yolo_infer_ms:.2f}" if self.yolo_infer_ms >= 0.0 else "",
+            f"{self.yolo_queue_ms:.2f}" if self.yolo_queue_ms >= 0.0 else "",
+            f"{self.depth_node_ms:.2f}" if self.depth_node_ms >= 0.0 else "",
+            f"{self.depth_crop_ms:.2f}" if self.depth_crop_ms >= 0.0 else "",
+            f"{self.depth_distance_ms:.2f}" if self.depth_distance_ms >= 0.0 else "",
+            f"{self.depth_publish_ms:.2f}" if self.depth_publish_ms >= 0.0 else "",
+            f"{self.safety_node_ms:.2f}" if self.safety_node_ms >= 0.0 else "",
+            f"{self.safety_eval_ms:.2f}" if self.safety_eval_ms >= 0.0 else "",
+            f"{self.safety_publish_ms:.2f}" if self.safety_publish_ms >= 0.0 else "",
+            f"{self.total_system_latency_ms:.2f}" if self.total_system_latency_ms >= 0.0 else "",
         ])
         self.csv_file.flush()
         self.state_changed = 0
@@ -437,7 +568,12 @@ class ExperimentLoggerNode(Node):
                 f"bbox_cx={self.closest_cx:.2f} | conf={self.closest_conf:.3f} | "
                 f"input_fps={self.input_fps:.2f} | output_fps={self.output_fps:.2f} | "
                 f"safety_state_hz={self.safety_state_hz:.2f} | "
-                f"e2e_ms_disp={self.e2e_latency_ms_disp:.1f} | e2e_ms_det={self.e2e_latency_ms_det:.1f}"
+                f"cam_i_ms={self.camera_intensity_ms:.1f} cam_d_ms={self.camera_disparity_ms:.1f} "
+                f"yolo_ms={self.yolo_node_ms:.1f} yolo_infer_ms={self.yolo_infer_ms:.1f} "
+                f"depth_crop_ms={self.depth_crop_ms:.1f} depth_dist_ms={self.depth_distance_ms:.1f} "
+                f"depth_pub_ms={self.depth_publish_ms:.1f} safety_eval_ms={self.safety_eval_ms:.1f} "
+                f"safety_pub_ms={self.safety_publish_ms:.1f} | "
+                f"nodes_total_ms={self.nodes_total_ms:.1f}"
             )
             self._last_status_print_t = now_mono
 

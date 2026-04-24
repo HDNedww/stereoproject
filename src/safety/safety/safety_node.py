@@ -35,6 +35,10 @@ class SafetyNode(Node):
         self.declare_parameter("min_publish_hz", 10.0)
         self.declare_parameter("qos_reliability", "best_effort")  # reliable | best_effort
         self.declare_parameter("qos_depth", 10)
+        self.declare_parameter("latency_mode", False)
+        self.declare_parameter("out_latency_topic", "/latency/safety_ms")  # legacy total
+        self.declare_parameter("out_latency_eval_topic", "/latency/safety_eval_ms")
+        self.declare_parameter("out_latency_publish_topic", "/latency/safety_publish_ms")
 
         self.z_topic = str(self.get_parameter("z_topic").value)
         self.detected_topic = str(self.get_parameter("detected_topic").value)
@@ -50,10 +54,21 @@ class SafetyNode(Node):
         self.min_publish_hz = float(self.get_parameter("min_publish_hz").value)
         self.qos_reliability = str(self.get_parameter("qos_reliability").value).strip().lower()
         self.qos_depth = int(self.get_parameter("qos_depth").value)
+        self.latency_mode = bool(self.get_parameter("latency_mode").value)
+        self.out_latency_topic = str(self.get_parameter("out_latency_topic").value)
+        self.out_latency_eval_topic = str(self.get_parameter("out_latency_eval_topic").value)
+        self.out_latency_publish_topic = str(self.get_parameter("out_latency_publish_topic").value)
         self.qos = self._build_qos()
 
         self.pub_state = self.create_publisher(String, self.out_state_topic, self.qos)
         self.pub_level = self.create_publisher(UInt8, self.out_level_topic, self.qos)
+        self.pub_latency = self.create_publisher(Float32, self.out_latency_topic, self.qos) if self.latency_mode else None
+        self.pub_latency_eval = (
+            self.create_publisher(Float32, self.out_latency_eval_topic, self.qos) if self.latency_mode else None
+        )
+        self.pub_latency_publish = (
+            self.create_publisher(Float32, self.out_latency_publish_topic, self.qos) if self.latency_mode else None
+        )
 
         self.sub_z = self.create_subscription(Float32, self.z_topic, self.on_z, self.qos)
         self.sub_detected = self.create_subscription(Bool, self.detected_topic, self.on_detected, self.qos)
@@ -81,6 +96,11 @@ class SafetyNode(Node):
             f"depth_valid={self.depth_valid_topic} in_zone={self.in_zone_topic} "
             f"| qos={self.qos_reliability}"
         )
+        if self.latency_mode:
+            self.get_logger().info(
+                f"Latency mode ON -> {self.out_latency_topic}, "
+                f"{self.out_latency_eval_topic}, {self.out_latency_publish_topic}"
+            )
 
     def _build_qos(self):
         reliability = ReliabilityPolicy.RELIABLE
@@ -173,26 +193,44 @@ class SafetyNode(Node):
             self.last_debug_print_t = now
 
     def on_z(self, msg: Float32):
+        t0 = time.perf_counter()
         self.input_count += 1
 
         z = float(msg.data)
         self.last_z = z
 
+        t_eval0 = time.perf_counter()
         state, level = self.evaluate_state(z)
+        eval_ms = float((time.perf_counter() - t_eval0) * 1000.0)
 
         now = self.get_clock().now()
         dt = (now - self.last_pub_t).nanoseconds / 1e9
 
         changed = (state != self.last_state) or (level != self.last_level)
         rate_due = dt >= (1.0 / max(1e-6, self.min_publish_hz))
+        publish_ms = 0.0
 
         if changed or rate_due:
+            t_pub0 = time.perf_counter()
             self.publish(state, level, z)
+            publish_ms = float((time.perf_counter() - t_pub0) * 1000.0)
             self.last_state = state
             self.last_level = level
             self.last_pub_t = now
 
         self.print_debug_status(state)
+        if self.pub_latency is not None:
+            lat = Float32()
+            lat.data = float((time.perf_counter() - t0) * 1000.0)
+            self.pub_latency.publish(lat)
+            if self.pub_latency_eval is not None:
+                l_eval = Float32()
+                l_eval.data = eval_ms
+                self.pub_latency_eval.publish(l_eval)
+            if self.pub_latency_publish is not None:
+                l_pub = Float32()
+                l_pub.data = publish_ms
+                self.pub_latency_publish.publish(l_pub)
 
 
 def main():

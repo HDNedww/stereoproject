@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import time
 from collections import deque
 import numpy as np
 import cv2
@@ -72,6 +73,11 @@ class DepthNode(Node):
         self.declare_parameter("qos_reliability", "best_effort")  # reliable | best_effort
         self.declare_parameter("qos_depth", 10)
         self.declare_parameter("use_zone", False)
+        self.declare_parameter("latency_mode", False)
+        self.declare_parameter("out_latency_topic", "/latency/depth_ms")  # legacy total
+        self.declare_parameter("out_latency_crop_topic", "/latency/depth_roi_crop_ms")
+        self.declare_parameter("out_latency_distance_topic", "/latency/depth_distance_ms")
+        self.declare_parameter("out_latency_publish_topic", "/latency/depth_publish_ms")
 
         # ---- monitored zone in image coordinates ----
         self.declare_parameter("zone_use_percent", True)
@@ -134,6 +140,11 @@ class DepthNode(Node):
         self.qos_reliability = str(self.get_parameter("qos_reliability").value).strip().lower()
         self.qos_depth = int(self.get_parameter("qos_depth").value)
         self.use_zone = bool(self.get_parameter("use_zone").value)
+        self.latency_mode = bool(self.get_parameter("latency_mode").value)
+        self.out_latency_topic = str(self.get_parameter("out_latency_topic").value)
+        self.out_latency_crop_topic = str(self.get_parameter("out_latency_crop_topic").value)
+        self.out_latency_distance_topic = str(self.get_parameter("out_latency_distance_topic").value)
+        self.out_latency_publish_topic = str(self.get_parameter("out_latency_publish_topic").value)
 
         self.zone_x1 = int(self.get_parameter("zone_x1").value)
         self.zone_y1 = int(self.get_parameter("zone_y1").value)
@@ -213,6 +224,16 @@ class DepthNode(Node):
         self.pub_in_zone = self.create_publisher(Bool, self.out_in_zone_topic, self.qos)
         self.pub_color = self.create_publisher(Image, self.out_color_topic, self.qos)
         self.pub_depth_image = self.create_publisher(Image, self.out_depth_image_topic, self.qos)
+        self.pub_latency = self.create_publisher(Float32, self.out_latency_topic, self.qos) if self.latency_mode else None
+        self.pub_latency_crop = (
+            self.create_publisher(Float32, self.out_latency_crop_topic, self.qos) if self.latency_mode else None
+        )
+        self.pub_latency_distance = (
+            self.create_publisher(Float32, self.out_latency_distance_topic, self.qos) if self.latency_mode else None
+        )
+        self.pub_latency_publish = (
+            self.create_publisher(Float32, self.out_latency_publish_topic, self.qos) if self.latency_mode else None
+        )
 
         self.get_logger().info(
             f"Depth node started | fx_px={self.fx_px:.2f} baseline={self.baseline_m:.6f} "
@@ -222,6 +243,11 @@ class DepthNode(Node):
             f"Detection scaling: enabled={self.scale_detection_to_disparity} det_img_topic={self.detection_image_topic}"
         )
         self.get_logger().info(f"QoS: reliability={self.qos_reliability} depth={self.qos.depth}")
+        if self.latency_mode:
+            self.get_logger().info(
+                f"Latency mode ON -> {self.out_latency_topic}, {self.out_latency_crop_topic}, "
+                f"{self.out_latency_distance_topic}, {self.out_latency_publish_topic}"
+            )
 
     # ---------- helpers ----------
     def _build_qos(self):
@@ -528,6 +554,10 @@ class DepthNode(Node):
         self.latest_bboxes = candidate_bboxes
         self.latest_bbox = candidate_bboxes[0] if len(candidate_bboxes) > 0 else None
     def on_disparity(self, msg: Image):
+        t0 = time.perf_counter()
+        crop_ms = 0.0
+        distance_ms = 0.0
+        publish_t0 = None
         self.frame_i += 1
 
         try:
@@ -556,15 +586,20 @@ class DepthNode(Node):
             best_total_count = 0
 
             for bbox in self.latest_bboxes:
+                t_crop0 = time.perf_counter()
                 bbox_scaled = self.scale_bbox_to_disparity(bbox, w, h)
                 roi = self.clamp_bbox(bbox_scaled, w, h)
                 if roi is None:
+                    crop_ms += float((time.perf_counter() - t_crop0) * 1000.0)
                     continue
 
                 x1, y1, x2, y2 = roi
                 patch_u16 = disp[y1:y2, x1:x2]
                 patch = self.disparity_to_depth_m(patch_u16, fx_eff)
+                crop_ms += float((time.perf_counter() - t_crop0) * 1000.0)
+                t_dist0 = time.perf_counter()
                 z_candidate, valid_candidate, vals_candidate = self.estimate_depth(patch.reshape(-1))
+                distance_ms += float((time.perf_counter() - t_dist0) * 1000.0)
                 if not valid_candidate or not math.isfinite(z_candidate):
                     continue
 
@@ -603,7 +638,9 @@ class DepthNode(Node):
                 self.invalid_streak = 0
                 self.invalid_hold_count = 0
                 if self.smooth_depth:
+                    t_dist0 = time.perf_counter()
                     z = self.smooth_z(z)
+                    distance_ms += float((time.perf_counter() - t_dist0) * 1000.0)
                 self.last_good_z = z
             else:
                 self.invalid_streak += 1
@@ -622,6 +659,7 @@ class DepthNode(Node):
             self.last_good_z = None
             self.invalid_hold_count = 0
 
+        publish_t0 = time.perf_counter()
         out_z = Float32()
         out_z.data = z if depth_valid and math.isfinite(z) else -1.0
         self.pub_z.publish(out_z)
@@ -682,6 +720,23 @@ class DepthNode(Node):
 
         if (self.frame_i % 30) == 0:
             self.get_logger().info(status)
+        if self.pub_latency is not None:
+            publish_ms = float((time.perf_counter() - publish_t0) * 1000.0) if publish_t0 is not None else 0.0
+            lat = Float32()
+            lat.data = float((time.perf_counter() - t0) * 1000.0)
+            self.pub_latency.publish(lat)
+            if self.pub_latency_crop is not None:
+                l_crop = Float32()
+                l_crop.data = crop_ms
+                self.pub_latency_crop.publish(l_crop)
+            if self.pub_latency_distance is not None:
+                l_dist = Float32()
+                l_dist.data = distance_ms
+                self.pub_latency_distance.publish(l_dist)
+            if self.pub_latency_publish is not None:
+                l_pub = Float32()
+                l_pub.data = publish_ms
+                self.pub_latency_publish.publish(l_pub)
 
 
 def main():

@@ -9,6 +9,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import Image
+from std_msgs.msg import Float32
 from vision_msgs.msg import Detection2DArray, Detection2D, ObjectHypothesisWithPose, BoundingBox2D
 
 from cv_bridge import CvBridge
@@ -35,6 +36,10 @@ class YoloPersonNode(Node):
         self.declare_parameter("warmup_runs", 2)
         self.declare_parameter("qos_reliability", "best_effort")  # reliable | best_effort
         self.declare_parameter("qos_depth", 10)
+        self.declare_parameter("latency_mode", False)
+        self.declare_parameter("out_latency_topic", "/latency/yolo_ms")  # legacy total
+        self.declare_parameter("out_infer_latency_topic", "/latency/yolo_infer_ms")
+        self.declare_parameter("out_queue_latency_topic", "/latency/yolo_queue_ms")
 
         self.model_path   = str(self.get_parameter("model_path").value)
         self.conf         = float(self.get_parameter("conf").value)
@@ -52,6 +57,10 @@ class YoloPersonNode(Node):
         self.warmup_runs  = int(self.get_parameter("warmup_runs").value)
         self.qos_reliability = str(self.get_parameter("qos_reliability").value).strip().lower()
         self.qos_depth = int(self.get_parameter("qos_depth").value)
+        self.latency_mode = bool(self.get_parameter("latency_mode").value)
+        self.out_latency_topic = str(self.get_parameter("out_latency_topic").value)
+        self.out_infer_latency_topic = str(self.get_parameter("out_infer_latency_topic").value)
+        self.out_queue_latency_topic = str(self.get_parameter("out_queue_latency_topic").value)
         self.qos = self._build_qos()
 
         self.get_logger().info(f"Loading YOLO model: {self.model_path}")
@@ -62,6 +71,13 @@ class YoloPersonNode(Node):
         self.bridge = CvBridge()
         self.sub = self.create_subscription(Image, self.input_topic, self.on_image, self.qos)
         self.pub = self.create_publisher(Detection2DArray, self.output_topic, self.qos)
+        self.pub_latency = self.create_publisher(Float32, self.out_latency_topic, self.qos) if self.latency_mode else None
+        self.pub_latency_infer = (
+            self.create_publisher(Float32, self.out_infer_latency_topic, self.qos) if self.latency_mode else None
+        )
+        self.pub_latency_queue = (
+            self.create_publisher(Float32, self.out_queue_latency_topic, self.qos) if self.latency_mode else None
+        )
 
         self.frame_i = 0        # received frames
         self.proc_i = 0         # frames processed by YOLO
@@ -72,6 +88,11 @@ class YoloPersonNode(Node):
             f"Sub: {self.input_topic}  Pub: {self.output_topic}  imgsz={self.imgsz}  every_n={self.every_n} "
             f"device={self.device} half={self.use_half} qos={self.qos_reliability}"
         )
+        if self.latency_mode:
+            self.get_logger().info(
+                f"Latency mode ON -> {self.out_latency_topic}, "
+                f"{self.out_infer_latency_topic}, {self.out_queue_latency_topic}"
+            )
 
     def _extract_model_square_size(self, err_text: str):
         m = re.search(r"model input \(shape=\[1,3,(\d+),(\d+)\]\)", err_text)
@@ -131,6 +152,14 @@ class YoloPersonNode(Node):
         )
 
     def on_image(self, msg: Image):
+        t0 = time.perf_counter()
+        if self.pub_latency_queue is not None:
+            now_ns = self.get_clock().now().nanoseconds
+            msg_ns = int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
+            if msg_ns > 0 and now_ns >= msg_ns:
+                q = Float32()
+                q.data = float((now_ns - msg_ns) / 1e6)
+                self.pub_latency_queue.publish(q)
         self.frame_i += 1
         if self.every_n > 1 and (self.frame_i % self.every_n) != 0:
             self.skip_i += 1
@@ -156,6 +185,7 @@ class YoloPersonNode(Node):
             return
 
         try:
+            t_inf0 = time.perf_counter()
             results = self.model.predict(
                 source=bgr,
                 conf=self.conf,
@@ -167,6 +197,11 @@ class YoloPersonNode(Node):
                 half=self.use_half,
                 verbose=False
             )
+            infer_ms = float((time.perf_counter() - t_inf0) * 1000.0)
+            if self.pub_latency_infer is not None:
+                inf = Float32()
+                inf.data = infer_ms
+                self.pub_latency_infer.publish(inf)
         except Exception as e:
             self.get_logger().error(f"YOLO predict failed: {e}")
             return
@@ -206,6 +241,10 @@ class YoloPersonNode(Node):
                 out.detections.append(det)
 
         self.pub.publish(out)
+        if self.pub_latency is not None:
+            lat = Float32()
+            lat.data = float((time.perf_counter() - t0) * 1000.0)
+            self.pub_latency.publish(lat)
 
         self.proc_i += 1
         dt = time.time() - self.t0
