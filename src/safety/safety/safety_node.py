@@ -6,7 +6,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
-from std_msgs.msg import Float32, String, UInt8, Bool
+from std_msgs.msg import Float32, String, UInt8, Bool, UInt64
 
 
 class SafetyNode(Node):
@@ -21,6 +21,7 @@ class SafetyNode(Node):
         super().__init__("safety_node")
 
         self.declare_parameter("z_topic", "/depth/person_z")
+        self.declare_parameter("z_stamp_topic", "/depth/person_z_stamp_ns")
         self.declare_parameter("detected_topic", "/depth/person_detected")
         self.declare_parameter("depth_valid_topic", "/depth/depth_valid")
         self.declare_parameter("in_zone_topic", "/depth/in_zone")
@@ -39,8 +40,10 @@ class SafetyNode(Node):
         self.declare_parameter("out_latency_topic", "/latency/safety_ms")  # legacy total
         self.declare_parameter("out_latency_eval_topic", "/latency/safety_eval_ms")
         self.declare_parameter("out_latency_publish_topic", "/latency/safety_publish_ms")
+        self.declare_parameter("out_latency_depth_to_safety_queue_topic", "/latency/depth_to_safety_queue_ms")
 
         self.z_topic = str(self.get_parameter("z_topic").value)
+        self.z_stamp_topic = str(self.get_parameter("z_stamp_topic").value)
         self.detected_topic = str(self.get_parameter("detected_topic").value)
         self.depth_valid_topic = str(self.get_parameter("depth_valid_topic").value)
         self.in_zone_topic = str(self.get_parameter("in_zone_topic").value)
@@ -58,6 +61,9 @@ class SafetyNode(Node):
         self.out_latency_topic = str(self.get_parameter("out_latency_topic").value)
         self.out_latency_eval_topic = str(self.get_parameter("out_latency_eval_topic").value)
         self.out_latency_publish_topic = str(self.get_parameter("out_latency_publish_topic").value)
+        self.out_latency_depth_to_safety_queue_topic = str(
+            self.get_parameter("out_latency_depth_to_safety_queue_topic").value
+        )
         self.qos = self._build_qos()
 
         self.pub_state = self.create_publisher(String, self.out_state_topic, self.qos)
@@ -69,8 +75,13 @@ class SafetyNode(Node):
         self.pub_latency_publish = (
             self.create_publisher(Float32, self.out_latency_publish_topic, self.qos) if self.latency_mode else None
         )
+        self.pub_latency_depth_to_safety_queue = (
+            self.create_publisher(Float32, self.out_latency_depth_to_safety_queue_topic, self.qos)
+            if self.latency_mode else None
+        )
 
         self.sub_z = self.create_subscription(Float32, self.z_topic, self.on_z, self.qos)
+        self.sub_z_stamp = self.create_subscription(UInt64, self.z_stamp_topic, self.on_z_stamp, self.qos)
         self.sub_detected = self.create_subscription(Bool, self.detected_topic, self.on_detected, self.qos)
         self.sub_depth_valid = self.create_subscription(Bool, self.depth_valid_topic, self.on_depth_valid, self.qos)
         self.sub_in_zone = self.create_subscription(Bool, self.in_zone_topic, self.on_in_zone, self.qos)
@@ -85,6 +96,7 @@ class SafetyNode(Node):
         self.last_state = None
         self.last_level = None
         self.last_pub_t = self.get_clock().now()
+        self.latest_z_pub_stamp_ns = None
 
         self.input_count = 0
         self.output_count = 0
@@ -99,7 +111,8 @@ class SafetyNode(Node):
         if self.latency_mode:
             self.get_logger().info(
                 f"Latency mode ON -> {self.out_latency_topic}, "
-                f"{self.out_latency_eval_topic}, {self.out_latency_publish_topic}"
+                f"{self.out_latency_eval_topic}, {self.out_latency_publish_topic}, "
+                f"{self.out_latency_depth_to_safety_queue_topic}"
             )
 
     def _build_qos(self):
@@ -125,6 +138,9 @@ class SafetyNode(Node):
 
     def on_in_zone(self, msg: Bool):
         self.in_zone = bool(msg.data)
+
+    def on_z_stamp(self, msg: UInt64):
+        self.latest_z_pub_stamp_ns = int(msg.data)
 
     def evaluate_state(self, z: float):
         if not self.person_detected:
@@ -195,6 +211,12 @@ class SafetyNode(Node):
     def on_z(self, msg: Float32):
         t0 = time.perf_counter()
         self.input_count += 1
+        if self.pub_latency_depth_to_safety_queue is not None and self.latest_z_pub_stamp_ns is not None:
+            now_ns = self.get_clock().now().nanoseconds
+            if now_ns >= self.latest_z_pub_stamp_ns:
+                l_q = Float32()
+                l_q.data = float((now_ns - self.latest_z_pub_stamp_ns) / 1e6)
+                self.pub_latency_depth_to_safety_queue.publish(l_q)
 
         z = float(msg.data)
         self.last_z = z

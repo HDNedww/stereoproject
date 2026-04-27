@@ -27,17 +27,22 @@ class YoloPersonNode(Node):
         self.declare_parameter("person_class", 0)
         self.declare_parameter("input_topic", "/camera/intensity_rgb")
         self.declare_parameter("output_topic", "/det/persons")
-        self.declare_parameter("imgsz", 512)
-        self.declare_parameter("every_n", 1)
+        self.declare_parameter("imgsz", 416)
+        self.declare_parameter("every_n", 2)
         self.declare_parameter("min_box_w", 20.0)
         self.declare_parameter("min_box_h", 20.0)
         self.declare_parameter("device", "cpu")
         self.declare_parameter("half", False)
         self.declare_parameter("warmup_runs", 2)
+        self.declare_parameter("latest_frame_only", True)
+        self.declare_parameter("max_input_fps", 10.0)       # 0 disables input throttling
+        self.declare_parameter("max_pending_age_ms", 150.0) # drop stale pending frames before infer
+        self.declare_parameter("pending_poll_hz", 400.0)    # timer frequency for latest-frame worker
         self.declare_parameter("qos_reliability", "best_effort")  # reliable | best_effort
-        self.declare_parameter("qos_depth", 10)
+        self.declare_parameter("qos_depth", 1)
+        self.declare_parameter("status_print_hz", 2.0)
         self.declare_parameter("latency_mode", False)
-        self.declare_parameter("out_latency_topic", "/latency/yolo_ms")  # legacy total
+        self.declare_parameter("out_latency_topic", "/latency/yolo_ms")
         self.declare_parameter("out_infer_latency_topic", "/latency/yolo_infer_ms")
         self.declare_parameter("out_queue_latency_topic", "/latency/yolo_queue_ms")
 
@@ -55,8 +60,13 @@ class YoloPersonNode(Node):
         self.device       = str(self.get_parameter("device").value)
         self.use_half     = bool(self.get_parameter("half").value)
         self.warmup_runs  = int(self.get_parameter("warmup_runs").value)
+        self.latest_frame_only = bool(self.get_parameter("latest_frame_only").value)
+        self.max_input_fps = float(self.get_parameter("max_input_fps").value)
+        self.max_pending_age_ms = float(self.get_parameter("max_pending_age_ms").value)
+        self.pending_poll_hz = float(self.get_parameter("pending_poll_hz").value)
         self.qos_reliability = str(self.get_parameter("qos_reliability").value).strip().lower()
         self.qos_depth = int(self.get_parameter("qos_depth").value)
+        self.status_print_hz = float(self.get_parameter("status_print_hz").value)
         self.latency_mode = bool(self.get_parameter("latency_mode").value)
         self.out_latency_topic = str(self.get_parameter("out_latency_topic").value)
         self.out_infer_latency_topic = str(self.get_parameter("out_infer_latency_topic").value)
@@ -78,15 +88,26 @@ class YoloPersonNode(Node):
         self.pub_latency_queue = (
             self.create_publisher(Float32, self.out_queue_latency_topic, self.qos) if self.latency_mode else None
         )
+        self.pending_msg = None
+        self.pending_msg_arrival_ns = 0
+        self.processing = False
+        poll_dt = 1.0 / max(1.0, self.pending_poll_hz)
+        self.timer = self.create_timer(poll_dt, self._process_pending)
 
         self.frame_i = 0        # received frames
         self.proc_i = 0         # frames processed by YOLO
         self.skip_i = 0         # dropped by every_n
+        self.drop_stale_i = 0   # dropped because pending frame got too old
+        self.drop_throttle_i = 0 # dropped by max_input_fps throttle
+        self.replace_pending_i = 0 # old pending replaced by a newer one
+        self.last_accept_ns = 0
         self.t0 = time.time()
 
         self.get_logger().info(
             f"Sub: {self.input_topic}  Pub: {self.output_topic}  imgsz={self.imgsz}  every_n={self.every_n} "
-            f"device={self.device} half={self.use_half} qos={self.qos_reliability}"
+            f"device={self.device} half={self.use_half} qos={self.qos_reliability} "
+            f"latest_frame_only={self.latest_frame_only} max_input_fps={self.max_input_fps} "
+            f"max_pending_age_ms={self.max_pending_age_ms}"
         )
         if self.latency_mode:
             self.get_logger().info(
@@ -152,6 +173,53 @@ class YoloPersonNode(Node):
         )
 
     def on_image(self, msg: Image):
+        now_ns = self.get_clock().now().nanoseconds
+        self.frame_i += 1
+
+        if self.max_input_fps > 0.0:
+            min_dt_ns = int(1e9 / max(1e-6, self.max_input_fps))
+            if self.last_accept_ns > 0 and (now_ns - self.last_accept_ns) < min_dt_ns:
+                self.drop_throttle_i += 1
+                return
+
+        if self.every_n > 1 and (self.frame_i % self.every_n) != 0:
+            self.skip_i += 1
+            return
+
+        self.last_accept_ns = now_ns
+
+        if self.latest_frame_only:
+            # Keep only the newest frame so YOLO does not chase stale input.
+            if self.pending_msg is not None:
+                self.replace_pending_i += 1
+            self.pending_msg = msg
+            self.pending_msg_arrival_ns = now_ns
+            return
+
+        self._run_inference(msg)
+
+    def _process_pending(self):
+        if not self.latest_frame_only or self.processing or self.pending_msg is None:
+            return
+
+        if self.max_pending_age_ms > 0.0 and self.pending_msg_arrival_ns > 0:
+            age_ms = (self.get_clock().now().nanoseconds - self.pending_msg_arrival_ns) / 1e6
+            if age_ms > self.max_pending_age_ms:
+                self.pending_msg = None
+                self.pending_msg_arrival_ns = 0
+                self.drop_stale_i += 1
+                return
+
+        msg = self.pending_msg
+        self.pending_msg = None
+        self.pending_msg_arrival_ns = 0
+        self.processing = True
+        try:
+            self._run_inference(msg)
+        finally:
+            self.processing = False
+
+    def _run_inference(self, msg: Image):
         t0 = time.perf_counter()
         if self.pub_latency_queue is not None:
             now_ns = self.get_clock().now().nanoseconds
@@ -160,10 +228,6 @@ class YoloPersonNode(Node):
                 q = Float32()
                 q.data = float((now_ns - msg_ns) / 1e6)
                 self.pub_latency_queue.publish(q)
-        self.frame_i += 1
-        if self.every_n > 1 and (self.frame_i % self.every_n) != 0:
-            self.skip_i += 1
-            return
 
         try:
             img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
@@ -248,17 +312,23 @@ class YoloPersonNode(Node):
 
         self.proc_i += 1
         dt = time.time() - self.t0
-        if dt > 2.0:
+        print_interval = 1.0 / max(1e-6, self.status_print_hz)
+        if dt > print_interval:
             recv_fps = self.frame_i / dt
             yolo_fps = self.proc_i / dt
             self.get_logger().info(
                 f"YOLO FPS ~ {yolo_fps:.1f}  input_fps ~ {recv_fps:.1f}  skipped={self.skip_i} "
-                f"imgsz={self.imgsz} every_n={self.every_n} dets={len(out.detections)}"
+                f"drop_throttle={self.drop_throttle_i} drop_stale={self.drop_stale_i} "
+                f"replaced_pending={self.replace_pending_i} imgsz={self.imgsz} every_n={self.every_n} "
+                f"dets={len(out.detections)}"
             )
             self.t0 = time.time()
             self.frame_i = 0
             self.proc_i = 0
             self.skip_i = 0
+            self.drop_stale_i = 0
+            self.drop_throttle_i = 0
+            self.replace_pending_i = 0
 
 
 def main():

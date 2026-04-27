@@ -10,7 +10,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import Image
-from std_msgs.msg import Float32, String, Bool
+from std_msgs.msg import Float32, String, Bool, UInt64
 from vision_msgs.msg import Detection2DArray
 
 from cv_bridge import CvBridge
@@ -70,6 +70,7 @@ class DepthNode(Node):
         self.declare_parameter("out_in_zone_topic", "/depth/in_zone")
         self.declare_parameter("out_color_topic", "/depth/colormap")
         self.declare_parameter("out_depth_image_topic", "/depth/image_m")
+        self.declare_parameter("out_z_stamp_topic", "/depth/person_z_stamp_ns")
         self.declare_parameter("qos_reliability", "best_effort")  # reliable | best_effort
         self.declare_parameter("qos_depth", 10)
         self.declare_parameter("use_zone", False)
@@ -78,6 +79,8 @@ class DepthNode(Node):
         self.declare_parameter("out_latency_crop_topic", "/latency/depth_roi_crop_ms")
         self.declare_parameter("out_latency_distance_topic", "/latency/depth_distance_ms")
         self.declare_parameter("out_latency_publish_topic", "/latency/depth_publish_ms")
+        self.declare_parameter("out_latency_disp_queue_topic", "/latency/disp_queue_ms")
+        self.declare_parameter("out_latency_det_queue_topic", "/latency/det_queue_ms")
 
         # ---- monitored zone in image coordinates ----
         self.declare_parameter("zone_use_percent", True)
@@ -137,6 +140,7 @@ class DepthNode(Node):
         self.out_in_zone_topic = str(self.get_parameter("out_in_zone_topic").value)
         self.out_color_topic = str(self.get_parameter("out_color_topic").value)
         self.out_depth_image_topic = str(self.get_parameter("out_depth_image_topic").value)
+        self.out_z_stamp_topic = str(self.get_parameter("out_z_stamp_topic").value)
         self.qos_reliability = str(self.get_parameter("qos_reliability").value).strip().lower()
         self.qos_depth = int(self.get_parameter("qos_depth").value)
         self.use_zone = bool(self.get_parameter("use_zone").value)
@@ -145,6 +149,8 @@ class DepthNode(Node):
         self.out_latency_crop_topic = str(self.get_parameter("out_latency_crop_topic").value)
         self.out_latency_distance_topic = str(self.get_parameter("out_latency_distance_topic").value)
         self.out_latency_publish_topic = str(self.get_parameter("out_latency_publish_topic").value)
+        self.out_latency_disp_queue_topic = str(self.get_parameter("out_latency_disp_queue_topic").value)
+        self.out_latency_det_queue_topic = str(self.get_parameter("out_latency_det_queue_topic").value)
 
         self.zone_x1 = int(self.get_parameter("zone_x1").value)
         self.zone_y1 = int(self.get_parameter("zone_y1").value)
@@ -224,6 +230,7 @@ class DepthNode(Node):
         self.pub_in_zone = self.create_publisher(Bool, self.out_in_zone_topic, self.qos)
         self.pub_color = self.create_publisher(Image, self.out_color_topic, self.qos)
         self.pub_depth_image = self.create_publisher(Image, self.out_depth_image_topic, self.qos)
+        self.pub_z_stamp = self.create_publisher(UInt64, self.out_z_stamp_topic, self.qos)
         self.pub_latency = self.create_publisher(Float32, self.out_latency_topic, self.qos) if self.latency_mode else None
         self.pub_latency_crop = (
             self.create_publisher(Float32, self.out_latency_crop_topic, self.qos) if self.latency_mode else None
@@ -233,6 +240,12 @@ class DepthNode(Node):
         )
         self.pub_latency_publish = (
             self.create_publisher(Float32, self.out_latency_publish_topic, self.qos) if self.latency_mode else None
+        )
+        self.pub_latency_disp_queue = (
+            self.create_publisher(Float32, self.out_latency_disp_queue_topic, self.qos) if self.latency_mode else None
+        )
+        self.pub_latency_det_queue = (
+            self.create_publisher(Float32, self.out_latency_det_queue_topic, self.qos) if self.latency_mode else None
         )
 
         self.get_logger().info(
@@ -246,7 +259,8 @@ class DepthNode(Node):
         if self.latency_mode:
             self.get_logger().info(
                 f"Latency mode ON -> {self.out_latency_topic}, {self.out_latency_crop_topic}, "
-                f"{self.out_latency_distance_topic}, {self.out_latency_publish_topic}"
+                f"{self.out_latency_distance_topic}, {self.out_latency_publish_topic}, "
+                f"{self.out_latency_disp_queue_topic}, {self.out_latency_det_queue_topic}"
             )
 
     # ---------- helpers ----------
@@ -530,6 +544,13 @@ class DepthNode(Node):
         self.latest_det_img_h = int(msg.height)
 
     def on_detections(self, msg: Detection2DArray):
+        if self.pub_latency_det_queue is not None:
+            now_ns = self.get_clock().now().nanoseconds
+            msg_ns = int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
+            if msg_ns > 0 and now_ns >= msg_ns:
+                m = Float32()
+                m.data = float((now_ns - msg_ns) / 1e6)
+                self.pub_latency_det_queue.publish(m)
         self.latest_det_count = len(msg.detections)
         self.latest_det_stamp_ns = self.get_clock().now().nanoseconds
 
@@ -558,6 +579,13 @@ class DepthNode(Node):
         crop_ms = 0.0
         distance_ms = 0.0
         publish_t0 = None
+        if self.pub_latency_disp_queue is not None:
+            now_ns = self.get_clock().now().nanoseconds
+            msg_ns = int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
+            if msg_ns > 0 and now_ns >= msg_ns:
+                m = Float32()
+                m.data = float((now_ns - msg_ns) / 1e6)
+                self.pub_latency_disp_queue.publish(m)
         self.frame_i += 1
 
         try:
@@ -663,6 +691,9 @@ class DepthNode(Node):
         out_z = Float32()
         out_z.data = z if depth_valid and math.isfinite(z) else -1.0
         self.pub_z.publish(out_z)
+        z_stamp = UInt64()
+        z_stamp.data = int(self.get_clock().now().nanoseconds)
+        self.pub_z_stamp.publish(z_stamp)
 
         self.publish_bool(self.pub_detected, person_detected)
         self.publish_bool(self.pub_depth_valid, depth_valid)
